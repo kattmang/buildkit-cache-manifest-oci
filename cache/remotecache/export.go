@@ -135,6 +135,7 @@ func (ce *artifactContentCacheExporter) Finalize(ctx context.Context) (map[strin
 		Size:      int64(len(dt)),
 		MediaType: mfst.MediaType,
 	}
+
 	mfstDone := progress.OneOff(ctx, fmt.Sprintf("writing kangmatt's manifest %s", dgst))
 	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
 		return nil, mfstDone(errors.Wrap(err, "error writing manifest blob"))
