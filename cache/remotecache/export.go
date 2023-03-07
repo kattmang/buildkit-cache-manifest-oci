@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
 	v1 "github.com/moby/buildkit/cache/remotecache/v1"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver"
@@ -43,7 +42,16 @@ const (
 	ExporterResponseManifestDesc = "cache.manifest"
 )
 
-type contentCacheExporter struct {
+func NewExporter(ingester content.Ingester, ref string, oci bool, compressionConfig compression.Config) Exporter {
+	cc := v1.NewCacheChains()
+	return &artifactContentCacheExporter{CacheExporterTarget: cc, chains: cc, ingester: ingester, oci: oci, ref: ref, comp: compressionConfig}
+}
+
+//TODO: readd contentCacheExporter and refactor to not need an alternative/child exporter
+//TODO: add flag (maybe replace OCI flag?)
+
+// Below is an OCI 1.1-compliant "Image Manifest as Artifact" approach
+type artifactContentCacheExporter struct {
 	solver.CacheExporterTarget
 	chains   *v1.CacheChains
 	ingester content.Ingester
@@ -52,22 +60,17 @@ type contentCacheExporter struct {
 	comp     compression.Config
 }
 
-func NewExporter(ingester content.Ingester, ref string, oci bool, compressionConfig compression.Config) Exporter {
-	cc := v1.NewCacheChains()
-	return &contentCacheExporter{CacheExporterTarget: cc, chains: cc, ingester: ingester, oci: oci, ref: ref, comp: compressionConfig}
-}
-
-func (ce *contentCacheExporter) Name() string {
+func (ce *artifactContentCacheExporter) Name() string {
 	return "exporting content cache"
 }
 
-func (ce *contentCacheExporter) Config() Config {
+func (ce *artifactContentCacheExporter) Config() Config {
 	return Config{
 		Compression: ce.comp,
 	}
 }
 
-func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string, error) {
+func (ce *artifactContentCacheExporter) Finalize(ctx context.Context) (map[string]string, error) {
 	res := make(map[string]string)
 	config, descs, err := ce.chains.Marshal(ctx)
 	if err != nil {
@@ -75,21 +78,18 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	}
 
 	// own type because oci type can't be pushed and docker type doesn't have annotations
-	type manifestList struct {
+	type manifestImageArtifact struct {
 		specs.Versioned
-
 		MediaType string `json:"mediaType,omitempty"`
 
-		// Manifests references platform specific manifests.
-		Manifests []ocispecs.Descriptor `json:"manifests"`
+		Config ocispecs.Descriptor `json:"config"`
+
+		Layers []ocispecs.Descriptor `json:"layers"`
 	}
 
-	var mfst manifestList
+	var mfst manifestImageArtifact
 	mfst.SchemaVersion = 2
-	mfst.MediaType = images.MediaTypeDockerSchema2ManifestList
-	if ce.oci {
-		mfst.MediaType = ocispecs.MediaTypeImageIndex
-	}
+	mfst.MediaType = ocispecs.MediaTypeImageManifest
 
 	for _, l := range config.Layers {
 		dgstPair, ok := descs[l.Blob]
@@ -101,10 +101,10 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 			return nil, layerDone(errors.Wrap(err, "error writing layer blob"))
 		}
 		layerDone(nil)
-		mfst.Manifests = append(mfst.Manifests, dgstPair.Descriptor)
+		mfst.Layers = append(mfst.Layers, dgstPair.Descriptor)
 	}
 
-	mfst.Manifests = compression.ConvertAllLayerMediaTypes(ce.oci, mfst.Manifests...)
+	//mfst.Layers = compression.ConvertAllLayerMediaTypes(ce.oci, mfst.Manifests...)
 
 	dt, err := json.Marshal(config)
 	if err != nil {
@@ -122,7 +122,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	}
 	configDone(nil)
 
-	mfst.Manifests = append(mfst.Manifests, desc)
+	mfst.Config = desc
 
 	dt, err = json.Marshal(mfst)
 	if err != nil {
@@ -135,7 +135,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 		Size:      int64(len(dt)),
 		MediaType: mfst.MediaType,
 	}
-	mfstDone := progress.OneOff(ctx, fmt.Sprintf("writing manifest %s", dgst))
+	mfstDone := progress.OneOff(ctx, fmt.Sprintf("writing kangmatt's wackyass manifest %s", dgst))
 	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
 		return nil, mfstDone(errors.Wrap(err, "error writing manifest blob"))
 	}
